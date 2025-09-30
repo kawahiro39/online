@@ -10,7 +10,6 @@ Flask application that exposes an SSE endpoint for real-time online counts witho
 
 ## Environment Variables
 
-- `CORS_ORIGINS` — domain to return in `Access-Control-Allow-Origin` (set to your Bubble app's origin, defaults to `*`).
 - `PORT` (default: `8080`)
 
 ## Development
@@ -19,10 +18,10 @@ Install dependencies and run the Flask app:
 
 ```bash
 pip install -r requirements.txt
-gunicorn -b 0.0.0.0:8080 app:app
+gunicorn -b 0.0.0.0:8080 -w 1 -k gevent -t 0 app:app
 ```
 
--No external services are required to run the server.
+- No external services are required to run the server.
 
 ## Container Image
 
@@ -34,9 +33,9 @@ docker build -t presence-service .
 docker run --rm -p 8080:8080 presence-service
 ```
 
-The container entrypoint uses Gunicorn with the threaded worker class so
-Server-Sent Event streams flush promptly while still supporting concurrent
-requests.
+The container entrypoint runs Gunicorn with a single gevent worker and no
+timeout so Server-Sent Event streams remain open indefinitely while still
+supporting concurrent connections.
 
 ## Cloud Run Deployment Notes
 
