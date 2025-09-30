@@ -44,3 +44,11 @@ docker run --rm -p 8080:8080 \
 The container entrypoint uses Gunicorn with the threaded worker class so
 Server-Sent Event streams flush promptly while still supporting concurrent
 requests.
+
+## Troubleshooting
+
+- `/healthz` returning `404` usually means the latest container revision was not
+  deployed; confirm the Cloud Run service is using the new image.
+- `/readyz` returning `{ "ok": false, "error": "redis_unreachable" }` means
+  the application cannot connect to Redis. Verify the `REDIS_HOST`, networking
+  (e.g. VPC connector), and that the instance is in the same region.

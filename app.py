@@ -226,7 +226,8 @@ def readyz() -> Response:
     try:
         _get_redis_client().ping()
     except redis.RedisError:
-        return jsonify({"ok": False}), 503
+        logger.exception("readyz_error: redis_unreachable")
+        return jsonify({"ok": False, "error": "redis_unreachable"}), 503
     return jsonify({"ok": True})
 
 
