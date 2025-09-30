@@ -27,6 +27,7 @@ idle visitors without any external data store. Presence is calculated from recen
   Visitors whose last heartbeat arrived within 60 seconds are treated as online, and
   those whose `last_activity` is within the most recent five minutes are considered
   active. Responses disable proxy buffering so events arrive immediately.
+
 - `GET /healthz` — always returns `{ "ok": true }`.
 - `GET /readyz` — always returns `{ "ok": true }`.
 

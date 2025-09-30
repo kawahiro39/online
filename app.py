@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from threading import Lock
@@ -9,7 +11,6 @@ from flask import Flask, Response, request, stream_with_context
 from gevent import sleep
 
 app = Flask(__name__)
-
 
 @dataclass
 class Presence:
@@ -77,6 +78,11 @@ def _sse_response(iterable, status: int = 200) -> Response:
         response.headers[key] = value
     return response
 
+def _sse_response(iterable, status: int = 200) -> Response:
+    response = Response(iterable, status=status)
+    for key, value in _SSE_HEADERS.items():
+        response.headers[key] = value
+    return response
 
 @app.after_request
 def add_cors_headers(resp: Response) -> Response:
@@ -118,7 +124,6 @@ def hit():
 def healthz():
     return {"ok": True}, 200
 
-
 @app.get("/readyz")
 def readyz():
     return {"ok": True}, 200
@@ -159,7 +164,7 @@ def sse_online():
                 }
                 yield f"data: {json.dumps(error_payload)}\n\n"
                 return
-
+                  
     try:
         return _sse_response(stream_with_context(event_stream()))
     except Exception as exc:  # pragma: no cover - defensive route guard
@@ -181,6 +186,23 @@ def sse_online():
 
         return _sse_response(error_stream())
 
+    try:
+        return _sse_response(stream_with_context(event_stream()))
+    except Exception as exc:  # pragma: no cover - defensive route guard
+        app.logger.exception("Unhandled SSE request error", exc_info=exc)
+
+        def error_stream():
+            now_ts = _now()
+            active_uids = _prune_and_snapshot(now_ts)
+            payload = {
+                "ts": now_ts,
+                "online_total": len(active_uids),
+                "uids": active_uids,
+                "error": "internal_error",
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+
+        return _sse_response(error_stream())
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
