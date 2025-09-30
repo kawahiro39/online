@@ -44,53 +44,59 @@ def _get_redis_client() -> redis.Redis:
     return _create_redis_client()
 
 presence_ttl = int(os.environ.get("PRESENCE_TTL", "90"))
-allowed_origins = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin.strip()]
+raw_origins = os.environ.get("CORS_ORIGINS", "*")
+allowed_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+allow_any_origin = "*" in allowed_origins or not allowed_origins
 
 
-def _get_request_origin() -> str | None:
-    origin = request.headers.get("Origin")
-    if origin and origin in allowed_origins:
-        return origin
-    return None
-
-
-  ]def _make_cors_preflight_response() -> Response:
+def _make_cors_preflight_response() -> Response:
     """Return a CORS-compliant response for browser preflight checks."""
 
     response = Response(status=204)
-    origin = _get_request_origin()
-    if origin:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Vary"] = "Origin"
+    return response
+
+
+def _resolve_allow_origin(origin: str | None) -> tuple[str | None, bool]:
+    """Determine the appropriate Access-Control-Allow-Origin header value."""
+
+    if allow_any_origin:
+        if origin:
+            return origin, True
+        return "*", False
+    if origin and origin in allowed_origins:
+        return origin, True
+    return None, False
+
+
+@app.after_request
+def apply_cors(response: Response) -> Response:
+    origin = request.headers.get("Origin")
+    allow_origin, should_vary = _resolve_allow_origin(origin)
+
+    if allow_origin:
+        response.headers["Access-Control-Allow-Origin"] = allow_origin
+        if allow_origin != "*":
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        if should_vary:
+            existing_vary = response.headers.get("Vary")
+            if existing_vary:
+                if "Origin" not in existing_vary:
+                    response.headers["Vary"] = f"{existing_vary}, Origin"
+            else:
+                response.headers["Vary"] = "Origin"
+
     requested_method = request.headers.get("Access-Control-Request-Method")
     if requested_method:
         response.headers["Access-Control-Allow-Methods"] = requested_method
     else:
-        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        response.headers.setdefault("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+
     requested_headers = request.headers.get("Access-Control-Request-Headers")
     if requested_headers:
         response.headers["Access-Control-Allow-Headers"] = requested_headers
     else:
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    response.headers["Access-Control-Max-Age"] = "600"
-    return response
-  
-@app.after_request
-def apply_cors(response: Response) -> Response:
-    origin = request.headers.get("Origin")
-    if origin and origin in allowed_origins:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        existing_vary = response.headers.get("Vary")
-        if existing_vary:
-            if "Origin" not in existing_vary:
-                response.headers["Vary"] = f"{existing_vary}, Origin"
-        else:
-            response.headers["Vary"] = "Origin"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        if request.method != "OPTIONS":
-            response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
-            response.headers.setdefault("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
+    response.headers.setdefault("Access-Control-Max-Age", "600")
     return response
 
 

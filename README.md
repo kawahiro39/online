@@ -15,7 +15,7 @@ Flask application that records page presence events in Redis and exposes an SSE 
 - `REDIS_PORT` (default: `6379`)
 - `REDIS_PASSWORD` (optional)
 - `PRESENCE_TTL` (default: `90` seconds)
-- `CORS_ORIGINS` — comma separated list of allowed origins (for example `https://solar-system-82998.bubbleapps.io`).
+- `CORS_ORIGINS` — comma separated list of allowed origins (default: `*`; set to `https://solar-system-82998.bubbleapps.io` once verified).
 - `PORT` (default: `8080`)
 
 ## Development
