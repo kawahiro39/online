@@ -10,7 +10,7 @@ Flask application that exposes an SSE endpoint for real-time online counts witho
 
 ## Environment Variables
 
-- `CORS_ORIGINS` — comma separated list of allowed origins (default: `*`; set to `https://solar-system-82998.bubbleapps.io` once verified).
+- `CORS_ALLOW_ORIGIN` — optional fallback value for `Access-Control-Allow-Origin` when requests omit the `Origin` header (default: `*`).
 - `PORT` (default: `8080`)
 
 ## Development
@@ -19,7 +19,7 @@ Install dependencies and run the Flask app:
 
 ```bash
 pip install -r requirements.txt
-python app.py
+gunicorn -b 0.0.0.0:8080 app:app
 ```
 
 -No external services are required to run the server.

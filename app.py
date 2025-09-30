@@ -1,49 +1,74 @@
+import asyncio
+import json
 import os
 import threading
 import time
-import json
-import asyncio
 from threading import Lock
-from typing import Dict, Tuple
-from flask import Flask, request, Response
+
+from flask import Flask, Response, request
+from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__)
 
-# === 同時接続カウンタ（role=client のみ） ===
-_ONLINE = 0
-_USER_COUNTS: Dict[str, int] = {}
-_LOCK = Lock()
+_online_count = 0
+_lock = Lock()
+_cors_fallback = os.getenv("CORS_ALLOW_ORIGIN", "*")
 
 
-def _inc(uid: str) -> None:
-    """Increment counters for the given user ID."""
-    global _ONLINE
-    with _LOCK:
-        _ONLINE += 1
-        _USER_COUNTS[uid] = _USER_COUNTS.get(uid, 0) + 1
-
-
-def _dec(uid: str) -> None:
-    """Decrement counters for the given user ID."""
-    global _ONLINE
-    with _LOCK:
-        if _ONLINE > 0:
-            _ONLINE -= 1
-        current = _USER_COUNTS.get(uid)
-        if current is None:
-            return
-        if current <= 1:
-            _USER_COUNTS.pop(uid, None)
-        else:
-            _USER_COUNTS[uid] = current - 1
-
-
-def _snapshot() -> Tuple[int, Dict[str, int]]:
-    with _LOCK:
-        return _ONLINE, dict(_USER_COUNTS)
-
-def _now():
+def _now() -> int:
     return int(time.time())
+
+
+def _change_online(delta: int) -> None:
+    global _online_count
+    with _lock:
+        _online_count = max(0, _online_count + delta)
+
+
+def _get_online() -> int:
+    with _lock:
+        return _online_count
+
+
+def _resolve_origin() -> str:
+    origin = request.headers.get("Origin")
+    return origin if origin else _cors_fallback
+
+
+@app.after_request
+def add_cors_headers(resp: Response) -> Response:
+    resp.headers["Access-Control-Allow-Origin"] = _resolve_origin()
+    resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Max-Age"] = "600"
+    return resp
+
+
+@app.errorhandler(Exception)
+def handle_exceptions(exc: Exception):
+    if isinstance(exc, HTTPException):
+        response = exc.get_response()
+        response.data = json.dumps({"error": exc.description})
+        response.content_type = "application/json"
+        return response
+
+    app.logger.exception("Unhandled exception during request", exc_info=exc)
+    return Response(
+        json.dumps({"error": "Internal Server Error"}),
+        status=500,
+        mimetype="application/json",
+    )
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}, 200
+
+
+@app.get("/readyz")
+def readyz():
+    return {"ok": True}, 200
 
 @app.after_request
 def cors(resp):
@@ -63,14 +88,29 @@ def healthz():
 @app.route("/sse/online", methods=["GET", "OPTIONS"])
 def sse_online():
     if request.method == "OPTIONS":
-        return ("", 204)
+        return "", 204
 
     role = request.args.get("role", "client")
-    uid = request.args.get("uid")
-    if role == "client" and not uid:
-        return {"error": "uid is required for role=client"}, 400
-
     counted = role == "client"
+
+    if counted:
+        _change_online(1)
+
+    async def event_stream():
+        try:
+            while True:
+                payload = {"ts": _now(), "online_total": _get_online()}
+                yield f"data: {json.dumps(payload)}\n\n"
+                await asyncio.sleep(2)
+        finally:
+            if counted:
+                _change_online(-1)
+
+    response = Response(event_stream(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Connection"] = "keep-alive"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
     if counted:
         _inc(uid)
