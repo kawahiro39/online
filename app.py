@@ -54,7 +54,7 @@ def _get_request_origin() -> str | None:
     return None
 
 
-def _make_cors_preflight_response() -> Response:
+  ]def _make_cors_preflight_response() -> Response:
     """Return a CORS-compliant response for browser preflight checks."""
 
     response = Response(status=204)
@@ -75,8 +75,7 @@ def _make_cors_preflight_response() -> Response:
     response.headers["Access-Control-Allow-Credentials"] = "true"
     response.headers["Access-Control-Max-Age"] = "600"
     return response
-
-
+  
 @app.after_request
 def apply_cors(response: Response) -> Response:
     origin = request.headers.get("Origin")
