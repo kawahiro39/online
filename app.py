@@ -97,7 +97,6 @@ def apply_cors(response: Response) -> Response:
     else:
         response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
     response.headers.setdefault("Access-Control-Max-Age", "600")
-
     return response
 
 
