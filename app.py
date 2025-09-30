@@ -1,132 +1,95 @@
-import json
-import logging
 import os
 import threading
 import time
-from typing import Iterable
-
-from flask import Flask, Response, jsonify, request, stream_with_context
-
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import json
+import asyncio
+from threading import Lock
+from typing import Dict, Tuple
+from flask import Flask, request, Response
 
 app = Flask(__name__)
 
-raw_origins = os.environ.get("CORS_ORIGINS", "*")
-allowed_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
-allow_any_origin = "*" in allowed_origins or not allowed_origins
-
-_online_count = 0
-_online_count_lock = threading.Lock()
+# === 同時接続カウンタ（role=client のみ） ===
+_ONLINE = 0
+_USER_COUNTS: Dict[str, int] = {}
+_LOCK = Lock()
 
 
-def _increment_online_count() -> int:
-    global _online_count
-    with _online_count_lock:
-        _online_count += 1
-        return _online_count
+def _inc(uid: str) -> None:
+    """Increment counters for the given user ID."""
+    global _ONLINE
+    with _LOCK:
+        _ONLINE += 1
+        _USER_COUNTS[uid] = _USER_COUNTS.get(uid, 0) + 1
 
 
-def _decrement_online_count() -> int:
-    global _online_count
-    with _online_count_lock:
-        _online_count = max(0, _online_count - 1)
-        return _online_count
+def _dec(uid: str) -> None:
+    """Decrement counters for the given user ID."""
+    global _ONLINE
+    with _LOCK:
+        if _ONLINE > 0:
+            _ONLINE -= 1
+        current = _USER_COUNTS.get(uid)
+        if current is None:
+            return
+        if current <= 1:
+            _USER_COUNTS.pop(uid, None)
+        else:
+            _USER_COUNTS[uid] = current - 1
 
 
-def _get_online_count() -> int:
-    with _online_count_lock:
-        return _online_count
+def _snapshot() -> Tuple[int, Dict[str, int]]:
+    with _LOCK:
+        return _ONLINE, dict(_USER_COUNTS)
 
-
-def _make_cors_preflight_response() -> Response:
-    """Return a CORS-compliant response for browser preflight checks."""
-
-    response = Response(status=204)
-    return response
-
-
-def _resolve_allow_origin(origin: str | None) -> tuple[str | None, bool]:
-    """Determine the appropriate Access-Control-Allow-Origin header value."""
-
-    if allow_any_origin:
-        if origin:
-            return origin, True
-        return "*", True
-    if origin and origin in allowed_origins:
-        return origin, True
-    if allowed_origins:
-        return allowed_origins[0], True
-    return "*", True
-
+def _now():
+    return int(time.time())
 
 @app.after_request
-def apply_cors(response: Response) -> Response:
-    origin = request.headers.get("Origin")
-    allow_origin, should_vary = _resolve_allow_origin(origin)
+def cors(resp):
+    # 管理・訪問ともブラウザから直接叩くのでCORSを許可
+    origin = request.headers.get("Origin") or "*"
+    resp.headers["Access-Control-Allow-Origin"] = origin
+    resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Max-Age"] = "600"
+    return resp
 
-    response.headers["Access-Control-Allow-Origin"] = allow_origin or "*"
-    if allow_origin != "*":
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-
-    if should_vary:
-        existing_vary = response.headers.get("Vary")
-        if existing_vary:
-            if "Origin" not in existing_vary:
-                response.headers["Vary"] = f"{existing_vary}, Origin"
-        else:
-            response.headers["Vary"] = "Origin"
-    else:
-        response.headers.setdefault("Vary", "Origin")
-
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Max-Age"] = "600"
-    return response
-
-
-def _sse_stream() -> Iterable[str]:
-    current = _increment_online_count()
-    logger.info("sse_connect total=%s", current)
-    try:
-        while True:
-            payload = {"ts": int(time.time()), "online_total": _get_online_count()}
-            data = json.dumps(payload, ensure_ascii=False)
-            yield f"data: {data}\n\n"
-            time.sleep(2)
-    finally:
-        current = _decrement_online_count()
-        logger.info("sse_disconnect remaining=%s", current)
-
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}, 200
 
 @app.route("/sse/online", methods=["GET", "OPTIONS"])
-def stream_online() -> Response:
+def sse_online():
     if request.method == "OPTIONS":
-        return _make_cors_preflight_response()
-    headers = {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",
-    }
-    return Response(
-        stream_with_context(_sse_stream()),
-        headers=headers,
-        mimetype="text/event-stream",
-    )
+        return ("", 204)
 
+    role = request.args.get("role", "client")
+    uid = request.args.get("uid")
+    if role == "client" and not uid:
+        return {"error": "uid is required for role=client"}, 400
 
-@app.route("/healthz", methods=["GET", "HEAD"])
-def healthz() -> Response:
-    return jsonify({"ok": True})
+    counted = role == "client"
 
+    if counted:
+        _inc(uid)
+    async def gen():
+        try:
+            while True:
+                total, by_user = _snapshot()
+                data = {
+                    "ts": _now(),
+                    "online_total": total,
+                    "online_by_user": by_user,
+                }
+                yield f"data: {json.dumps(data)}\n\n"
+                await asyncio.sleep(2)
+        finally:
+            if counted:
+                _dec(uid)
 
-@app.route("/readyz", methods=["GET", "HEAD"])
-def readyz() -> Response:
-    return jsonify({"ok": True})
-
+    return Response(gen(), mimetype="text/event-stream")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
