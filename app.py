@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import threading
 import time
 from threading import Lock
 from typing import Dict, Iterator, List
@@ -35,6 +37,9 @@ def _record_user(uid: str, timestamp: int) -> None:
     with _lock:
         _online_users[uid] = timestamp
 
+def _record_user(uid: str, timestamp: int) -> None:
+    with _lock:
+        _online_users[uid] = timestamp
 
 def _prune_and_snapshot(current_ts: int) -> List[str]:
     threshold = current_ts - _STALE_THRESHOLD_SECONDS
@@ -59,7 +64,6 @@ def _sse_response(iterable, status: int = 200) -> Response:
     for key, value in _SSE_HEADERS.items():
         response.headers[key] = value
     return response
-
 
 @app.after_request
 def add_cors_headers(resp: Response) -> Response:
@@ -145,7 +149,6 @@ def sse_online():
             yield f"data: {json.dumps(payload)}\n\n"
 
         return _sse_response(error_stream())
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
