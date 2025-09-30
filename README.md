@@ -4,7 +4,8 @@ Flask application that records page presence events in Redis and exposes an SSE 
 
 ## Endpoints
 
-- `POST /v1/hit` — accepts `sid`, `path`, `kind` (load/beat/unload) and stores presence data in Redis.
+- `POST /v1/hit` — accepts `sid`, `path`, `kind` (load/beat/unload) and stores presence data in Redis. Redis write failures are
+  logged with `[HIT_ERR_*]` tags and return `{ "ok": false, "degraded": true }` with HTTP 202 instead of surfacing a 5xx.
 - `GET /sse/online` — streams aggregated online counts every two seconds via Server-Sent Events. Responses disable proxy buffering so the first event is delivered immediately.
 - `GET /healthz` — always returns `{ "ok": true }`.
 - `GET /readyz` — returns `{ "ok": true }` when Redis responds to `PING`.
@@ -49,6 +50,45 @@ requests.
 
 - `/healthz` returning `404` usually means the latest container revision was not
   deployed; confirm the Cloud Run service is using the new image.
-- `/readyz` returning `{ "ok": false, "error": "redis_unreachable" }` means
-  the application cannot connect to Redis. Verify the `REDIS_HOST`, networking
-  (e.g. VPC connector), and that the instance is in the same region.
+- `/readyz` returning `{ "ok": false, "error": "..." }` means the
+  application cannot connect to Redis. Verify the `REDIS_HOST`, networking (for
+  example, a VPC connector), and that the instance is in the same region.
+
+## Cloud Run Deployment Checklist
+
+1. Confirm traffic is pinned to the latest revision:
+
+   ```bash
+   gcloud run services describe online --region asia-northeast1 \
+     --format='value(status.url,status.traffic[0].revisionName)'
+   ```
+
+   Reassign traffic in the console or with `gcloud` if the active revision does
+   not match the latest deployment.
+
+2. Enable private Redis access using Serverless VPC Access and direct all
+   egress through it so Memorystore can be reached:
+
+   ```bash
+   gcloud run services update online --region asia-northeast1 \
+     --vpc-connector <YOUR_VPC_CONNECTOR> --vpc-egress all-traffic
+   ```
+
+3. Point the service at the Memorystore instance using its private IP and set
+   the runtime tuning variables:
+
+   ```bash
+   gcloud run services update online --region asia-northeast1 \
+     --set-env-vars \
+       REDIS_HOST=<MEMORYSTORE_PRIVATE_IP>,\
+       REDIS_PORT=6379,\
+       PRESENCE_TTL=90,\
+       CORS_ORIGINS=https://solar-system-82998.bubbleapps.io
+   ```
+
+4. Reduce cold starts and increase concurrency headroom for SSE connections:
+
+   ```bash
+   gcloud run services update online --region asia-northeast1 \
+     --min-instances 1 --concurrency 50
+   ```

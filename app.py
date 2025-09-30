@@ -21,8 +21,8 @@ _redis_pool = redis.ConnectionPool(
     host=redis_host,
     port=redis_port,
     password=redis_password,
-    socket_connect_timeout=1,
-    socket_timeout=1,
+    socket_connect_timeout=1.5,
+    socket_timeout=1.5,
     health_check_interval=30,
     decode_responses=True,
 )
@@ -62,10 +62,12 @@ def _resolve_allow_origin(origin: str | None) -> tuple[str | None, bool]:
     if allow_any_origin:
         if origin:
             return origin, True
-        return "*", False
+        return "*", True
     if origin and origin in allowed_origins:
         return origin, True
-    return None, False
+    if allowed_origins:
+        return allowed_origins[0], True
+    return "*", True
 
 
 @app.after_request
@@ -73,30 +75,23 @@ def apply_cors(response: Response) -> Response:
     origin = request.headers.get("Origin")
     allow_origin, should_vary = _resolve_allow_origin(origin)
 
-    if allow_origin:
-        response.headers["Access-Control-Allow-Origin"] = allow_origin
-        if allow_origin != "*":
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-        if should_vary:
-            existing_vary = response.headers.get("Vary")
-            if existing_vary:
-                if "Origin" not in existing_vary:
-                    response.headers["Vary"] = f"{existing_vary}, Origin"
-            else:
-                response.headers["Vary"] = "Origin"
+    response.headers["Access-Control-Allow-Origin"] = allow_origin or "*"
+    if allow_origin != "*":
+        response.headers["Access-Control-Allow-Credentials"] = "true"
 
-    requested_method = request.headers.get("Access-Control-Request-Method")
-    if requested_method:
-        response.headers["Access-Control-Allow-Methods"] = requested_method
+    if should_vary:
+        existing_vary = response.headers.get("Vary")
+        if existing_vary:
+            if "Origin" not in existing_vary:
+                response.headers["Vary"] = f"{existing_vary}, Origin"
+        else:
+            response.headers["Vary"] = "Origin"
     else:
-        response.headers.setdefault("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        response.headers.setdefault("Vary", "Origin")
 
-    requested_headers = request.headers.get("Access-Control-Request-Headers")
-    if requested_headers:
-        response.headers["Access-Control-Allow-Headers"] = requested_headers
-    else:
-        response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
-    response.headers.setdefault("Access-Control-Max-Age", "600")
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Max-Age"] = "600"
     return response
 
 
@@ -135,24 +130,73 @@ def record_hit() -> Response:
     presence_key = f"presence:{sid}"
     online_key = f"online:{path}"
 
-    redis_client = _get_redis_client()
-    pipeline = redis_client.pipeline(transaction=False)
+    try:
+        redis_client = _get_redis_client()
+    except Exception:  # noqa: BLE001
+        logger.exception("[HIT_ERR_CLIENT] sid=%s path=%s kind=%s", sid, path, event_kind)
+        return jsonify({"ok": False, "degraded": True, "errors": ["[HIT_ERR_CLIENT]"]}), 202
+    degraded = False
+    error_tags: List[str] = []
+
+    def _mark_error(tag: str) -> None:
+        nonlocal degraded
+        degraded = True
+        error_tags.append(tag)
+
     if event_kind == "unload":
-        pipeline.delete(presence_key)
-        pipeline.zrem(online_key, sid)
+        try:
+            redis_client.delete(presence_key)
+        except redis.RedisError:  # noqa: BLE001
+            _mark_error("[HIT_ERR_DELETE]")
+            logger.exception("[HIT_ERR_DELETE] sid=%s path=%s kind=%s", sid, path, event_kind)
+        try:
+            redis_client.zrem(online_key, sid)
+        except redis.RedisError:  # noqa: BLE001
+            _mark_error("[HIT_ERR_ZREM]")
+            logger.exception("[HIT_ERR_ZREM] sid=%s path=%s kind=%s", sid, path, event_kind)
     else:
-        pipeline.setex(presence_key, presence_ttl, now)
-        pipeline.zadd(online_key, {sid: now})
-        if event_kind == "load":
-            pipeline.incr("metrics:pv:total")
-    pipeline.zremrangebyscore(online_key, 0, now - presence_ttl)
-    pipeline.expire(online_key, 300)
+        try:
+            redis_client.setex(presence_key, presence_ttl, now)
+        except redis.RedisError:  # noqa: BLE001
+            _mark_error("[HIT_ERR_SETEX]")
+            logger.exception("[HIT_ERR_SETEX] sid=%s path=%s kind=%s", sid, path, event_kind)
+        try:
+            redis_client.zadd(online_key, {sid: now})
+        except redis.RedisError:  # noqa: BLE001
+            _mark_error("[HIT_ERR_ZADD]")
+            logger.exception("[HIT_ERR_ZADD] sid=%s path=%s kind=%s", sid, path, event_kind)
 
     try:
-        pipeline.execute()
+        redis_client.zremrangebyscore(online_key, 0, now - presence_ttl)
     except redis.RedisError:  # noqa: BLE001
-        logger.exception("hit_error: redis_failure")
-        return jsonify({"ok": False, "error": "redis_error"}), 503
+        _mark_error("[HIT_ERR_ZREMRANGE]")
+        logger.exception("[HIT_ERR_ZREMRANGE] sid=%s path=%s kind=%s", sid, path, event_kind)
+
+    try:
+        redis_client.expire(online_key, 300)
+    except redis.RedisError:  # noqa: BLE001
+        _mark_error("[HIT_ERR_EXPIRE]")
+        logger.exception("[HIT_ERR_EXPIRE] sid=%s path=%s kind=%s", sid, path, event_kind)
+
+    if event_kind == "load":
+        try:
+            redis_client.incr("metrics:pv:total")
+        except redis.RedisError:  # noqa: BLE001
+            _mark_error("[HIT_ERR_INCR]")
+            logger.exception("[HIT_ERR_INCR] sid=%s path=%s kind=%s", sid, path, event_kind)
+
+    if degraded:
+        logger.warning(
+            "[HIT_DEGRADED] sid=%s path=%s kind=%s stages=%s",
+            sid,
+            path,
+            event_kind,
+            ",".join(error_tags) or "unknown",
+        )
+        response_payload = {"ok": False, "degraded": True}
+        if error_tags:
+            response_payload["errors"] = error_tags
+        return jsonify(response_payload), 202
 
     logger.info("hit_ok sid=%s kind=%s path=%s", sid, event_kind, path)
     return jsonify({"ok": True})
@@ -225,9 +269,9 @@ def healthz() -> Response:
 def readyz() -> Response:
     try:
         _get_redis_client().ping()
-    except redis.RedisError:
+    except redis.RedisError as exc:  # noqa: BLE001
         logger.exception("readyz_error: redis_unreachable")
-        return jsonify({"ok": False, "error": "redis_unreachable"}), 503
+        return jsonify({"ok": False, "error": str(exc)}), 503
     return jsonify({"ok": True})
 
 
