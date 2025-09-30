@@ -1,23 +1,26 @@
 # Cloud Run Real-time Presence Service
 
-Flask application that records page presence events in Redis and exposes an SSE endpoint for real-time online counts.
+Flask application that exposes a hit endpoint and SSE stream to track active visitors
+without any external data store. Presence is calculated from recent `uid` heartbeats
+sent by the Bubble application.
 
 ## Endpoints
 
-- `POST /v1/hit` — accepts `sid`, `path`, `kind` (load/beat/unload) and stores presence data in Redis. Redis write failures are
-  logged with `[HIT_ERR_*]` tags and return `{ "ok": false, "degraded": true }` with HTTP 202 instead of surfacing a 5xx.
-- `GET /sse/online` — streams aggregated online counts every two seconds via Server-Sent Events. Responses disable proxy buffering so the first event is delivered immediately.
+- `POST /v1/hit` — accepts `{ "uid": "<user-id>" }` and records the caller as present
+  for 30 seconds from the time of the request. Intended to be invoked from the visitor
+  page every ~30 seconds.
+- `GET /sse/online` — streams the current list of active visitors every two seconds as
+  Server-Sent Events with payloads like `{ "ts": 1710000000, "online_total": 3,
+  "uids": ["alice", "bob", "carol"] }`. Responses disable proxy buffering so
+  events arrive immediately.
 - `GET /healthz` — always returns `{ "ok": true }`.
-- `GET /readyz` — returns `{ "ok": true }` when Redis responds to `PING`.
+- `GET /readyz` — always returns `{ "ok": true }`.
 
 ## Environment Variables
 
-- `REDIS_HOST` (required for production)
-- `REDIS_PORT` (default: `6379`)
-- `REDIS_PASSWORD` (optional)
-- `PRESENCE_TTL` (default: `90` seconds)
-- `CORS_ORIGINS` — comma separated list of allowed origins (default: `*`; set to `https://solar-system-82998.bubbleapps.io` once verified).
 - `PORT` (default: `8080`)
+- `CORS_ALLOW_ORIGIN` — Bubble domain allowed to access the API. Defaults to
+  `https://solar-system-82998.bubbleapps.io`.
 
 ## Development
 
@@ -25,10 +28,10 @@ Install dependencies and run the Flask app:
 
 ```bash
 pip install -r requirements.txt
-python app.py
+gunicorn -b 0.0.0.0:8080 -w 1 -k gevent -t 0 app:app
 ```
 
-Ensure Redis is available locally when running the server.
+No external services are required to run the server.
 
 ## Container Image
 
@@ -37,58 +40,16 @@ To build and run the service in a container (e.g. for Cloud Run), use the provid
 
 ```bash
 docker build -t presence-service .
-docker run --rm -p 8080:8080 \
-  -e REDIS_HOST=host.docker.internal \
-  presence-service
+docker run --rm -p 8080:8080 presence-service
 ```
 
-The container entrypoint uses Gunicorn with the threaded worker class so
-Server-Sent Event streams flush promptly while still supporting concurrent
-requests.
+The container entrypoint runs Gunicorn with a single gevent worker and no timeout so
+Server-Sent Event streams remain open indefinitely while still supporting concurrent
+connections.
 
-## Troubleshooting
+## Cloud Run Deployment Notes
 
-- `/healthz` returning `404` usually means the latest container revision was not
-  deployed; confirm the Cloud Run service is using the new image.
-- `/readyz` returning `{ "ok": false, "error": "..." }` means the
-  application cannot connect to Redis. Verify the `REDIS_HOST`, networking (for
-  example, a VPC connector), and that the instance is in the same region.
-
-## Cloud Run Deployment Checklist
-
-1. Confirm traffic is pinned to the latest revision:
-
-   ```bash
-   gcloud run services describe online --region asia-northeast1 \
-     --format='value(status.url,status.traffic[0].revisionName)'
-   ```
-
-   Reassign traffic in the console or with `gcloud` if the active revision does
-   not match the latest deployment.
-
-2. Enable private Redis access using Serverless VPC Access and direct all
-   egress through it so Memorystore can be reached:
-
-   ```bash
-   gcloud run services update online --region asia-northeast1 \
-     --vpc-connector <YOUR_VPC_CONNECTOR> --vpc-egress all-traffic
-   ```
-
-3. Point the service at the Memorystore instance using its private IP and set
-   the runtime tuning variables:
-
-   ```bash
-   gcloud run services update online --region asia-northeast1 \
-     --set-env-vars \
-       REDIS_HOST=<MEMORYSTORE_PRIVATE_IP>,\
-       REDIS_PORT=6379,\
-       PRESENCE_TTL=90,\
-       CORS_ORIGINS=https://solar-system-82998.bubbleapps.io
-   ```
-
-4. Reduce cold starts and increase concurrency headroom for SSE connections:
-
-   ```bash
-   gcloud run services update online --region asia-northeast1 \
-     --min-instances 1 --concurrency 50
-   ```
+- Configure the Cloud Run service with `max-instances=1` so a single instance maintains
+  the in-memory presence dictionary.
+- Adjust `--concurrency` to the expected number of simultaneous SSE clients (for example
+  `--concurrency 50`).
