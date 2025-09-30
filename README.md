@@ -1,16 +1,26 @@
 # Cloud Run Real-time Presence Service
 
-Flask application that exposes an SSE endpoint for real-time online counts without any external data store.
+Flask application that exposes a hit endpoint and SSE stream to track active visitors
+without any external data store. Presence is calculated from recent `uid` heartbeats
+sent by the Bubble application.
 
 ## Endpoints
 
-- `GET /sse/online` — streams the current number of connected browsers every two seconds via Server-Sent Events. Responses disable proxy buffering so the first event is delivered immediately.
+- `POST /v1/hit` — accepts `{ "uid": "<user-id>" }` and records the caller as present
+  for 30 seconds from the time of the request. Intended to be invoked from the visitor
+  page every ~30 seconds.
+- `GET /sse/online` — streams the current list of active visitors every two seconds as
+  Server-Sent Events with payloads like `{ "ts": 1710000000, "online_total": 3,
+  "uids": ["alice", "bob", "carol"] }`. Responses disable proxy buffering so
+  events arrive immediately.
 - `GET /healthz` — always returns `{ "ok": true }`.
 - `GET /readyz` — always returns `{ "ok": true }`.
 
 ## Environment Variables
 
 - `PORT` (default: `8080`)
+- `CORS_ALLOW_ORIGIN` — Bubble domain allowed to access the API. Defaults to
+  `https://solar-system-82998.bubbleapps.io`.
 
 ## Development
 
@@ -21,7 +31,7 @@ pip install -r requirements.txt
 gunicorn -b 0.0.0.0:8080 -w 1 -k gevent -t 0 app:app
 ```
 
-- No external services are required to run the server.
+No external services are required to run the server.
 
 ## Container Image
 
@@ -33,11 +43,13 @@ docker build -t presence-service .
 docker run --rm -p 8080:8080 presence-service
 ```
 
-The container entrypoint runs Gunicorn with a single gevent worker and no
-timeout so Server-Sent Event streams remain open indefinitely while still
-supporting concurrent connections.
+The container entrypoint runs Gunicorn with a single gevent worker and no timeout so
+Server-Sent Event streams remain open indefinitely while still supporting concurrent
+connections.
 
 ## Cloud Run Deployment Notes
 
-- Configure the Cloud Run service with `max-instances=1` so a single instance maintains the in-memory connection count.
-- Adjust `--concurrency` to the expected number of simultaneous SSE clients (for example `--concurrency 50`).
+- Configure the Cloud Run service with `max-instances=1` so a single instance maintains
+  the in-memory presence dictionary.
+- Adjust `--concurrency` to the expected number of simultaneous SSE clients (for example
+  `--concurrency 50`).
