@@ -44,7 +44,6 @@ def _prune_and_snapshot(current_ts: int) -> List[str]:
         active = [uid for uid, last_seen in _online_users.items() if last_seen >= threshold]
     active.sort()
     return active
-  
 def _sse_response(iterable, status: int = 200) -> Response:
     response = Response(iterable, status=status)
     for key, value in _SSE_HEADERS.items():
@@ -67,7 +66,7 @@ def hit():
     if request.method == "OPTIONS":
         return Response("", status=204)
 
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(force=True, silent=True) or {}
     uid = payload.get("uid")
 
     if not uid:
