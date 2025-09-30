@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import threading
 import time
 from threading import Lock
 from typing import Dict, List
@@ -25,7 +27,6 @@ _STALE_THRESHOLD_SECONDS = 30
 _online_users: Dict[str, int] = {}
 _lock = Lock()
 
-
 def _now() -> int:
     return int(time.time())
 
@@ -33,7 +34,6 @@ def _now() -> int:
 def _record_user(uid: str, timestamp: int) -> None:
     with _lock:
         _online_users[uid] = timestamp
-
 
 def _prune_and_snapshot(current_ts: int) -> List[str]:
     threshold = current_ts - _STALE_THRESHOLD_SECONDS
@@ -44,14 +44,11 @@ def _prune_and_snapshot(current_ts: int) -> List[str]:
         active = [uid for uid, last_seen in _online_users.items() if last_seen >= threshold]
     active.sort()
     return active
-
-
 def _sse_response(iterable, status: int = 200) -> Response:
     response = Response(iterable, status=status)
     for key, value in _SSE_HEADERS.items():
         response.headers[key] = value
     return response
-
 
 @app.after_request
 def add_cors_headers(resp: Response) -> Response:
@@ -137,7 +134,6 @@ def sse_online():
             yield f"data: {json.dumps(payload)}\n\n"
 
         return _sse_response(error_stream())
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
