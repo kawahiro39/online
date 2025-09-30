@@ -29,7 +29,7 @@ _CORS_ALLOW_ORIGIN = os.getenv(
 )
 
 _LAST_SEEN_TTL_SECONDS = 60
-_IDLE_THRESHOLD_SECONDS = 120
+_IDLE_THRESHOLD_SECONDS = 60
 _SSE_BROADCAST_INTERVAL_SECONDS = 2
 
 _presence: Dict[str, Presence] = {}
@@ -44,7 +44,7 @@ def _update_presence(uid: str, timestamp: int, last_activity: Optional[int]) -> 
     with _lock:
         existing = _presence.get(uid)
         if last_activity is None:
-            resolved_activity = existing.last_activity if existing is not None else timestamp
+            resolved_activity = timestamp
         else:
             resolved_activity = last_activity
 
