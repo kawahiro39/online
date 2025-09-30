@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import threading
 import time
 from threading import Lock
 
@@ -21,6 +23,8 @@ _SSE_HEADERS = {
 def _now() -> int:
     return int(time.time())
 
+def _now() -> int:
+    return int(time.time())
 
 def _change_online(delta: int) -> None:
     global _online_count
@@ -39,6 +43,10 @@ def _sse_response(iterable, status: int = 200) -> Response:
         response.headers[key] = value
     return response
 
+def _change_online(delta: int) -> None:
+    global _online_count
+    with _lock:
+        _online_count = max(0, _online_count + delta)
 
 @app.after_request
 def add_cors_headers(resp: Response) -> Response:
@@ -47,7 +55,6 @@ def add_cors_headers(resp: Response) -> Response:
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     resp.headers["Vary"] = "Origin"
     return resp
-
 
 @app.get("/healthz")
 def healthz():
@@ -106,7 +113,6 @@ def sse_online():
             yield f"data: {json.dumps(error_payload)}\n\n"
 
         return _sse_response(error_stream())
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
