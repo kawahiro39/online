@@ -86,9 +86,8 @@ def _sse_response(iterable, status: int = 200) -> Response:
 
 @app.after_request
 def add_cors_headers(resp: Response) -> Response:
-    request_origin = request.headers.get("Origin")
-    allowed_origin = request_origin or _CORS_ALLOW_ORIGIN
-    resp.headers["Access-Control-Allow-Origin"] = allowed_origin
+    resp.headers["Access-Control-Allow-Origin"] = _CORS_ALLOW_ORIGIN
+    resp.headers["Access-Control-Allow-Credentials"] = "true"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     resp.headers["Vary"] = "Origin"
@@ -98,7 +97,13 @@ def add_cors_headers(resp: Response) -> Response:
 @app.route("/v1/hit", methods=["POST", "OPTIONS"])
 def hit():
     if request.method == "OPTIONS":
-        return Response("", status=204)
+        resp = Response("", status=204)
+        resp.headers["Access-Control-Allow-Origin"] = _CORS_ALLOW_ORIGIN
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Vary"] = "Origin"
+        return resp
 
     payload = request.get_json(force=True, silent=True) or {}
     uid = payload.get("uid")
@@ -132,7 +137,13 @@ def readyz():
 @app.route("/sse/online", methods=["GET", "OPTIONS"])
 def sse_online():
     if request.method == "OPTIONS":
-        return Response("", status=204)
+        resp = Response("", status=204)
+        resp.headers["Access-Control-Allow-Origin"] = _CORS_ALLOW_ORIGIN
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Vary"] = "Origin"
+        return resp
 
     def event_stream() -> Iterator[str]:
         while True:
