@@ -5,7 +5,7 @@ Flask application that records page presence events in Redis and exposes an SSE 
 ## Endpoints
 
 - `POST /v1/hit` — accepts `sid`, `path`, `kind` (load/beat/unload) and stores presence data in Redis.
-- `GET /sse/online` — streams aggregated online counts every two seconds via Server-Sent Events.
+- `GET /sse/online` — streams aggregated online counts every two seconds via Server-Sent Events. Responses disable proxy buffering so the first event is delivered immediately.
 - `GET /healthz` — always returns `{ "ok": true }`.
 - `GET /readyz` — returns `{ "ok": true }` when Redis responds to `PING`.
 
@@ -15,7 +15,7 @@ Flask application that records page presence events in Redis and exposes an SSE 
 - `REDIS_PORT` (default: `6379`)
 - `REDIS_PASSWORD` (optional)
 - `PRESENCE_TTL` (default: `90` seconds)
-- `CORS_ORIGINS` — comma separated list of allowed origins.
+- `CORS_ORIGINS` — comma separated list of allowed origins (for example `https://solar-system-82998.bubbleapps.io`).
 - `PORT` (default: `8080`)
 
 ## Development
@@ -41,5 +41,6 @@ docker run --rm -p 8080:8080 \
   presence-service
 ```
 
-The container entrypoint uses Gunicorn with a single worker to support streaming
-responses required by Server-Sent Events.
+The container entrypoint uses Gunicorn with the threaded worker class so
+Server-Sent Event streams flush promptly while still supporting concurrent
+requests.

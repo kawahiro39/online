@@ -17,19 +17,31 @@ redis_host = os.environ.get("REDIS_HOST", "localhost")
 redis_port = int(os.environ.get("REDIS_PORT", "6379"))
 redis_password = os.environ.get("REDIS_PASSWORD")
 
+_redis_pool = redis.ConnectionPool(
+    host=redis_host,
+    port=redis_port,
+    password=redis_password,
+    socket_connect_timeout=1,
+    socket_timeout=1,
+    health_check_interval=30,
+    decode_responses=True,
+)
+
+
 def _create_redis_client() -> redis.Redis:
+    """Create a Redis client with aggressive timeouts for probe endpoints."""
+
     return redis.Redis(
-        host=redis_host,
-        port=redis_port,
-        password=redis_password,
+        connection_pool=_redis_pool,
         decode_responses=True,
-        socket_connect_timeout=5,
-        socket_timeout=5,
-        health_check_interval=30,
+        retry_on_timeout=True,
     )
 
 
-redis_client = _create_redis_client()
+def _get_redis_client() -> redis.Redis:
+    """Return a Redis client instance bound to the shared connection pool."""
+
+    return _create_redis_client()
 
 presence_ttl = int(os.environ.get("PRESENCE_TTL", "90"))
 allowed_origins = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin.strip()]
@@ -42,6 +54,28 @@ def _get_request_origin() -> str | None:
     return None
 
 
+  ]def _make_cors_preflight_response() -> Response:
+    """Return a CORS-compliant response for browser preflight checks."""
+
+    response = Response(status=204)
+    origin = _get_request_origin()
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    requested_method = request.headers.get("Access-Control-Request-Method")
+    if requested_method:
+        response.headers["Access-Control-Allow-Methods"] = requested_method
+    else:
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    requested_headers = request.headers.get("Access-Control-Request-Headers")
+    if requested_headers:
+        response.headers["Access-Control-Allow-Headers"] = requested_headers
+    else:
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Max-Age"] = "600"
+    return response
+  
 @app.after_request
 def apply_cors(response: Response) -> Response:
     origin = request.headers.get("Origin")
@@ -54,19 +88,16 @@ def apply_cors(response: Response) -> Response:
         else:
             response.headers["Vary"] = "Origin"
         response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        if request.method != "OPTIONS":
+            response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type")
+            response.headers.setdefault("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
     return response
 
 
 @app.route("/v1/hit", methods=["POST", "OPTIONS"])
 def record_hit() -> Response:
     if request.method == "OPTIONS":
-        response = app.make_default_options_response()
-        origin = _get_request_origin()
-        if origin:
-            response.headers["Access-Control-Allow-Origin"] = origin
-        return response
+        return _make_cors_preflight_response()
 
     try:
         payload = request.get_json(force=True)  # type: ignore[no-untyped-call]
@@ -98,6 +129,7 @@ def record_hit() -> Response:
     presence_key = f"presence:{sid}"
     online_key = f"online:{path}"
 
+    redis_client = _get_redis_client()
     pipeline = redis_client.pipeline(transaction=False)
     if event_kind == "unload":
         pipeline.delete(presence_key)
@@ -127,6 +159,7 @@ def _collect_online_stats() -> Dict[str, object]:
     per_path: List[Tuple[str, int]] = []
 
     try:
+        redis_client = _get_redis_client()
         for key in redis_client.scan_iter(match="online:*"):
             path = key.split("online:", 1)[1]
             # Clean up stale members to keep counts accurate
@@ -160,25 +193,32 @@ def _sse_stream() -> Iterable[str]:
         time.sleep(2)
 
 
-@app.route("/sse/online", methods=["GET"])
+@app.route("/sse/online", methods=["GET", "OPTIONS"])
 def stream_online() -> Response:
+    if request.method == "OPTIONS":
+        return _make_cors_preflight_response()
     headers = {
         "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-transform",
         "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
     }
-    return Response(stream_with_context(_sse_stream()), headers=headers)
+    return Response(
+        stream_with_context(_sse_stream()),
+        headers=headers,
+        mimetype="text/event-stream",
+    )
 
 
-@app.route("/healthz", methods=["GET"])
+@app.route("/healthz", methods=["GET", "HEAD"])
 def healthz() -> Response:
     return jsonify({"ok": True})
 
 
-@app.route("/readyz", methods=["GET"])
+@app.route("/readyz", methods=["GET", "HEAD"])
 def readyz() -> Response:
     try:
-        redis_client.ping()
+        _get_redis_client().ping()
     except redis.RedisError:
         return jsonify({"ok": False}), 503
     return jsonify({"ok": True})
