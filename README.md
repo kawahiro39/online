@@ -1,18 +1,33 @@
 # Cloud Run Real-time Presence Service
 
-Flask application that exposes a hit endpoint and SSE stream to track active visitors
-without any external data store. Presence is calculated from recent `uid` heartbeats
-sent by the Bubble application.
+Flask application that exposes a heartbeat endpoint and SSE stream to track active and
+idle visitors without any external data store. Presence is calculated from recent
+`uid` heartbeats sent by the Bubble application.
 
 ## Endpoints
 
-- `POST /v1/hit` — accepts `{ "uid": "<user-id>" }` and records the caller as present
-  for 30 seconds from the time of the request. Intended to be invoked from the visitor
-  page every ~30 seconds.
-- `GET /sse/online` — streams the current list of active visitors every two seconds as
-  Server-Sent Events with payloads like `{ "ts": 1710000000, "online_total": 3,
-  "uids": ["alice", "bob", "carol"] }`. Responses disable proxy buffering so
-  events arrive immediately.
+- `POST /v1/hit` — accepts `{ "uid": "<user-id>", "last_activity": <unix-seconds> }`
+  and records both the heartbeat receipt time (`last_seen`) and the visitor's most
+  recent interaction (`last_activity`). Intended to be invoked from the visitor page
+  every ~30 seconds.
+- `GET /sse/online` — streams the current list of active and idle visitors every two
+  seconds as Server-Sent Events with payloads like:
+
+  ```json
+  {
+    "ts": 1710000000,
+    "online_total": 5,
+    "active_total": 3,
+    "idle_total": 2,
+    "active_uids": ["alice", "bob", "carol"],
+    "idle_uids": ["dave", "eve"]
+  }
+  ```
+
+  Visitors whose last heartbeat arrived within 60 seconds are treated as online, and
+  those whose `last_activity` is within the most recent five minutes are considered
+  active. Responses disable proxy buffering so events arrive immediately.
+
 - `GET /healthz` — always returns `{ "ok": true }`.
 - `GET /readyz` — always returns `{ "ok": true }`.
 

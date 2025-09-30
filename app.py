@@ -3,13 +3,20 @@ import json
 import os
 import threading
 import time
+from dataclasses import dataclass
 from threading import Lock
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator, List, Tuple
 
 from flask import Flask, Response, request, stream_with_context
 from gevent import sleep
 
 app = Flask(__name__)
+
+@dataclass
+class Presence:
+    last_seen: int
+    last_activity: int
+
 
 _SSE_HEADERS = {
     "Content-Type": "text/event-stream",
@@ -22,10 +29,11 @@ _CORS_ALLOW_ORIGIN = os.getenv(
     "CORS_ALLOW_ORIGIN", "https://solar-system-82998.bubbleapps.io"
 )
 
-_STALE_THRESHOLD_SECONDS = 30
+_LAST_SEEN_TTL_SECONDS = 60
+_ACTIVE_THRESHOLD_SECONDS = 300
 _SSE_BROADCAST_INTERVAL_SECONDS = 2
 
-_online_users: Dict[str, int] = {}
+_presence: Dict[str, Presence] = {}
 _lock = Lock()
 
 
@@ -33,31 +41,42 @@ def _now() -> int:
     return int(time.time())
 
 
-def _record_user(uid: str, timestamp: int) -> None:
+def _update_presence(uid: str, last_activity: int, timestamp: int) -> None:
     with _lock:
-        _online_users[uid] = timestamp
+        _presence[uid] = Presence(last_seen=timestamp, last_activity=last_activity)
 
-def _record_user(uid: str, timestamp: int) -> None:
-    with _lock:
-        _online_users[uid] = timestamp
 
-def _prune_and_snapshot(current_ts: int) -> List[str]:
-    threshold = current_ts - _STALE_THRESHOLD_SECONDS
+def _prune_and_snapshot(current_ts: int) -> Tuple[List[str], List[str]]:
+    last_seen_cutoff = current_ts - _LAST_SEEN_TTL_SECONDS
+    active_cutoff = current_ts - _ACTIVE_THRESHOLD_SECONDS
     with _lock:
         stale: List[str] = []
         active: List[str] = []
-        for uid, last_seen in list(_online_users.items()):
-            if last_seen < threshold:
+        idle: List[str] = []
+
+        for uid, data in list(_presence.items()):
+            if data.last_seen < last_seen_cutoff:
                 stale.append(uid)
-            else:
+                continue
+
+            if data.last_activity >= active_cutoff:
                 active.append(uid)
+            else:
+                idle.append(uid)
 
         for uid in stale:
-            _online_users.pop(uid, None)
+            _presence.pop(uid, None)
 
     active.sort()
-    return active
+    idle.sort()
+    return active, idle
 
+
+def _sse_response(iterable, status: int = 200) -> Response:
+    response = Response(iterable, status=status)
+    for key, value in _SSE_HEADERS.items():
+        response.headers[key] = value
+    return response
 
 def _sse_response(iterable, status: int = 200) -> Response:
     response = Response(iterable, status=status)
@@ -83,19 +102,27 @@ def hit():
 
     payload = request.get_json(force=True, silent=True) or {}
     uid = payload.get("uid")
+    last_activity = payload.get("last_activity")
 
     if not uid:
         return {"ok": False, "error": "no uid"}, 400
 
+    if last_activity is None:
+        return {"ok": False, "error": "no last_activity"}, 400
+
+    try:
+        last_activity_int = int(last_activity)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid last_activity"}, 400
+
     timestamp = _now()
-    _record_user(str(uid), timestamp)
+    _update_presence(str(uid), last_activity_int, timestamp)
     return {"ok": True}
 
 
 @app.get("/healthz")
 def healthz():
     return {"ok": True}, 200
-
 
 @app.get("/readyz")
 def readyz():
@@ -111,26 +138,53 @@ def sse_online():
         while True:
             try:
                 now_ts = _now()
-                active_uids = _prune_and_snapshot(now_ts)
+                active_uids, idle_uids = _prune_and_snapshot(now_ts)
                 payload = {
                     "ts": now_ts,
-                    "online_total": len(active_uids),
-                    "uids": active_uids,
+                    "online_total": len(active_uids) + len(idle_uids),
+                    "active_total": len(active_uids),
+                    "idle_total": len(idle_uids),
+                    "active_uids": active_uids,
+                    "idle_uids": idle_uids,
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
                 sleep(_SSE_BROADCAST_INTERVAL_SECONDS)
             except Exception as exc:  # pragma: no cover - defensive guard
                 app.logger.exception("SSE streaming error", exc_info=exc)
                 now_ts = _now()
-                active_uids = _prune_and_snapshot(now_ts)
+                active_uids, idle_uids = _prune_and_snapshot(now_ts)
                 error_payload = {
                     "ts": now_ts,
-                    "online_total": len(active_uids),
-                    "uids": active_uids,
+                    "online_total": len(active_uids) + len(idle_uids),
+                    "active_total": len(active_uids),
+                    "idle_total": len(idle_uids),
+                    "active_uids": active_uids,
+                    "idle_uids": idle_uids,
                     "error": "internal_error",
                 }
                 yield f"data: {json.dumps(error_payload)}\n\n"
                 return
+                  
+    try:
+        return _sse_response(stream_with_context(event_stream()))
+    except Exception as exc:  # pragma: no cover - defensive route guard
+        app.logger.exception("Unhandled SSE request error", exc_info=exc)
+
+        def error_stream():
+            now_ts = _now()
+            active_uids, idle_uids = _prune_and_snapshot(now_ts)
+            payload = {
+                "ts": now_ts,
+                "online_total": len(active_uids) + len(idle_uids),
+                "active_total": len(active_uids),
+                "idle_total": len(idle_uids),
+                "active_uids": active_uids,
+                "idle_uids": idle_uids,
+                "error": "internal_error",
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+
+        return _sse_response(error_stream())
 
     try:
         return _sse_response(stream_with_context(event_stream()))
