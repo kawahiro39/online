@@ -1,27 +1,45 @@
-import os, time, json, asyncio
+import os
+import time
+import json
+import asyncio
 from threading import Lock
+from typing import Dict, Tuple
 from flask import Flask, request, Response
 
 app = Flask(__name__)
 
 # === 同時接続カウンタ（role=client のみ） ===
 _ONLINE = 0
+_USER_COUNTS: Dict[str, int] = {}
 _LOCK = Lock()
 
-def _inc():
+
+def _inc(uid: str) -> None:
+    """Increment counters for the given user ID."""
     global _ONLINE
     with _LOCK:
         _ONLINE += 1
+        _USER_COUNTS[uid] = _USER_COUNTS.get(uid, 0) + 1
 
-def _dec():
+
+def _dec(uid: str) -> None:
+    """Decrement counters for the given user ID."""
     global _ONLINE
     with _LOCK:
         if _ONLINE > 0:
             _ONLINE -= 1
+        current = _USER_COUNTS.get(uid)
+        if current is None:
+            return
+        if current <= 1:
+            _USER_COUNTS.pop(uid, None)
+        else:
+            _USER_COUNTS[uid] = current - 1
 
-def _get():
+
+def _snapshot() -> Tuple[int, Dict[str, int]]:
     with _LOCK:
-        return _ONLINE
+        return _ONLINE, dict(_USER_COUNTS)
 
 def _now():
     return int(time.time())
@@ -47,20 +65,29 @@ def sse_online():
         return ("", 204)
 
     role = request.args.get("role", "client")
-    counted = (role == "client")
+    uid = request.args.get("uid")
+    if role == "client" and not uid:
+        return {"error": "uid is required for role=client"}, 400
+
+    counted = role == "client"
 
     if counted:
-        _inc()
+        _inc(uid)
 
     async def gen():
         try:
             while True:
-                data = {"ts": _now(), "online_total": _get()}
+                total, by_user = _snapshot()
+                data = {
+                    "ts": _now(),
+                    "online_total": total,
+                    "online_by_user": by_user,
+                }
                 yield f"data: {json.dumps(data)}\n\n"
                 await asyncio.sleep(2)
         finally:
             if counted:
-                _dec()
+                _dec(uid)
 
     return Response(gen(), mimetype="text/event-stream")
 
