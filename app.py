@@ -4,7 +4,7 @@ import os
 import threading
 import time
 from threading import Lock
-from typing import Dict, List
+from typing import Dict, Iterator, List
 
 from flask import Flask, Response, request, stream_with_context
 from gevent import sleep
@@ -23,9 +23,11 @@ _CORS_ALLOW_ORIGIN = os.getenv(
 )
 
 _STALE_THRESHOLD_SECONDS = 30
+_SSE_BROADCAST_INTERVAL_SECONDS = 2
 
 _online_users: Dict[str, int] = {}
 _lock = Lock()
+
 
 def _now() -> int:
     return int(time.time())
@@ -35,15 +37,28 @@ def _record_user(uid: str, timestamp: int) -> None:
     with _lock:
         _online_users[uid] = timestamp
 
+def _record_user(uid: str, timestamp: int) -> None:
+    with _lock:
+        _online_users[uid] = timestamp
+
 def _prune_and_snapshot(current_ts: int) -> List[str]:
     threshold = current_ts - _STALE_THRESHOLD_SECONDS
     with _lock:
-        stale = [uid for uid, last_seen in _online_users.items() if last_seen < threshold]
+        stale: List[str] = []
+        active: List[str] = []
+        for uid, last_seen in list(_online_users.items()):
+            if last_seen < threshold:
+                stale.append(uid)
+            else:
+                active.append(uid)
+
         for uid in stale:
             _online_users.pop(uid, None)
-        active = [uid for uid, last_seen in _online_users.items() if last_seen >= threshold]
+
     active.sort()
     return active
+
+
 def _sse_response(iterable, status: int = 200) -> Response:
     response = Response(iterable, status=status)
     for key, value in _SSE_HEADERS.items():
@@ -92,7 +107,7 @@ def sse_online():
     if request.method == "OPTIONS":
         return Response("", status=204)
 
-    def event_stream():
+    def event_stream() -> Iterator[str]:
         while True:
             try:
                 now_ts = _now()
@@ -103,7 +118,7 @@ def sse_online():
                     "uids": active_uids,
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
-                sleep(2)
+                sleep(_SSE_BROADCAST_INTERVAL_SECONDS)
             except Exception as exc:  # pragma: no cover - defensive guard
                 app.logger.exception("SSE streaming error", exc_info=exc)
                 now_ts = _now()
