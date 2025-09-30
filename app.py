@@ -12,8 +12,7 @@ app = Flask(__name__)
 
 _online_count = 0
 _lock = Lock()
-_cors_origin = os.getenv("CORS_ALLOW_ORIGIN", "*")
-
+_cors_origin = os.getenv("CORS_ORIGINS", "*")
 
 def _now() -> int:
     return int(time.time())

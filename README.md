@@ -10,7 +10,7 @@ Flask application that exposes an SSE endpoint for real-time online counts witho
 
 ## Environment Variables
 
-- `CORS_ALLOW_ORIGIN` — domain to return in `Access-Control-Allow-Origin` (set to your Bubble app's origin, defaults to `*`).
+- `CORS_ORIGINS` — domain to return in `Access-Control-Allow-Origin` (set to your Bubble app's origin, defaults to `*`).
 - `PORT` (default: `8080`)
 
 ## Development
